@@ -27,10 +27,10 @@
 
 			<transition name="fade">
 				<div v-if="!isLoading">
-					<breadcrumb :p="path"></breadcrumb>
+					<breadcrumb></breadcrumb>
 					<ul>
 						<template v-for="entry in structure.folders">
-							<folder :f="entry"></folder>
+							<folder :f="entry" :cache="getFolderStructure"></folder>
 						</template>
 
 						<template v-for="entry in structure.files">
@@ -56,19 +56,12 @@
 			'<i v-if="i !== (folders.length - 1)"> &raquo; </i>' +
 			'</span>' +
 			'</div>',
+			props: {
+				cache: Function
+			},
 			computed: {
 				folders() {
-					let output = [],
-					slug = '',
-					parts = this.$store.state.path.split('/');
-
-					for (let item of parts) {
-						slug += item;
-						output.push({'name': item || 'home', 'path': '#' + slug});
-						slug += '/';
-					}
-
-					return output;
+					return this.$store.state.breadcrumb;
 				}
 			}
 		});
@@ -76,7 +69,11 @@
 		Vue.component('folder', {
 			template: '<li><strong><a :href="\'#\' + f.path_lower">{{ f.name }}</a></strong></li>',
 			props: {
-				f: Object
+				f: Object,
+				cache: Function
+			},
+			created() {
+				this.cache(this.f.path_lower);
 			}
 		});
 
@@ -112,9 +109,15 @@
 			},
 
 			created() {
-				this.d.filesGetTemporaryLink({path: this.f.path_lower}).then(data => {
-					this.link = data.link;
-				});
+				if(this.f.download_link) {
+					this.link = this.f.download_link;
+				}
+				else {
+					this.d.filesGetTemporaryLink({path: this.f.path_lower}).then(data => {
+						this.link = data.link;
+					});
+				}
+				
 			},
 		});
 
@@ -123,7 +126,7 @@
 
 			data() {
 				return {
-					accessToken: 'yourAccessTokenHere',
+					accessToken: 'xJvdKWJ8LOsAAAAAAAAAFywr_R4zp6XiAwi27t64q-H6AE57mvDGydaeqzRc23FY',
 					structure: {},
 					isLoading: true
 				}
@@ -132,14 +135,6 @@
 			computed: {
 				path() {
 					return this.$store.state.path
-				},
-				slug() {
-					return this.path.toLowerCase()
-					.replace(/^\/|\/$/g, '')
-					.replace(/ /g,'-')
-					.replace(/\//g,'-')
-					.replace(/[-]+/g, '-')
-					.replace(/[^\w-]+/g,'');
 				}
 			},
 
@@ -150,84 +145,119 @@
 						accessToken: this.accessToken
 					});
 				},
+				generateSlug(path) {
+					return path.toLowerCase()
+						.replace(/^\/|\/$/g, '')
+						.replace(/ /g,'-')
+						.replace(/\//g,'-')
+						.replace(/[-]+/g, '-')
+						.replace(/[^\w-]+/g,'');
+				},
 
-				createFolderStructure(response) {
+				getFolderStructure(path) {
+					let output;
+
+					const slug = this.generateSlug(path),
+						data = this.$store.state.structure[slug];
+
+					if(data) {
+						output = Promise.resolve(data);
+					} 
+					else {
+						//console.log(`API query for ${path}`);
+
+						output = this.dropbox().filesListFolder({
+							path: path,
+							include_media_info: true
+						})
+						.then(response => {
+							//console.log(`Response for ${path}`);
+							let entries = response.entries;
+
+							this.$store.commit('structure', {
+								path: slug,
+								data: entries
+							});
+
+							return entries;
+						})
+						.catch(error => {
+							this.isLoading = 'error';
+							console.log(error);
+						});
+
+					}
+					return output;
+				},
+
+				displayFolderStructure() {
+					this.isLoading = true;
 
 					const structure = {
 						folders: [],
 						files: []
 					}
 
-					for (let entry of response.entries) {
-						// Check ".tag" prop for type
-						if(entry['.tag'] == 'folder') {
-							structure.folders.push(entry);
-						} else {
-							structure.files.push(entry);
+					this.getFolderStructure(this.path).then(data => {
+						for (let entry of data) {
+							// Check ".tag" prop for type
+							if(entry['.tag'] == 'folder') {
+								structure.folders.push(entry);
+							}
+							else {
+								structure.files.push(entry);
+							}
 						}
-					}
-
-					this.structure = structure;
-					this.isLoading = false;
-
-
-				},
-
-				createStructureAndSave(response) {
-
-					this.createFolderStructure(response)
-
-					this.$store.commit('structure', {
-						path: this.slug,
-						data: response
+						this.structure = structure;
+						this.isLoading =  false;
 					});
 				},
 
-				getFolderStructure() {
-					let data = this.$store.state.structure[this.slug];
-					if(data) {
-						this.createFolderStructure(data);
-					} else {
-						this.dropbox().filesListFolder({
-							path: this.path,
-							include_media_info: true
-						})
-						.then(this.createStructureAndSave)
-						.catch(error => {
-							this.isLoading = 'error';
-							console.log(error);
-						});
+				cacheParentFolders() {
+					let parents = this.$store.state.breadcrumb;
+					parents.reverse().shift();
+
+					for(let parent of parents) {
+						this.getFolderStructure(parent.path);
 					}
-
-				},
-
-				updateStructure() {
-					this.isLoading = true;
-					this.getFolderStructure();
 				}
 			},
-
 			created() {
-				this.getFolderStructure();
+				this.displayFolderStructure();
+				this.cacheParentFolders();
 			},
-
 			watch: {
 				path() {
-					this.updateStructure();
+					this.displayFolderStructure();
 				}
-			},
+			}
 		});
+
+
 
 		const store = new Vuex.Store({
 			state: {
 				path: '',
-				structure: {}
+				structure: {},
+				breadcrumb: []
 			},
 			mutations: {
 				updateHash(state) {
-					let hash = window.location.hash.substring(1);
-					state.path = (hash || '');
+					let path = (window.location.hash.substring(1) || ''),
+						breadcrumb = [],
+						slug = '',
+						parts = path.split('/');
+
+					for (let item of parts) {
+						slug += item;
+						breadcrumb.push({'name': item || 'home', 'path': slug});
+						slug += '/';
+					}
+
+					state.path = path
+					state.breadcrumb = breadcrumb;
 				},
+
 				structure(state, payload) {
 					state.structure[payload.path] = payload.data;
 				}
@@ -238,7 +268,8 @@
 			el: '#app',
 
 			store,
-			created() {
+			
+			mounted() {
 				store.commit('updateHash');
 			}
 		});
